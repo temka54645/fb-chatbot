@@ -174,7 +174,8 @@ async function sendTypingIndicator(recipientId) {
 // ============================================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Server ажиллаж байна: http://localhost:${PORT}`);
+  console.log(`🚀 Server ажиллаж байна (v2): http://localhost:${PORT}`);
   console.log(`📡 Webhook URL: /webhook`);
   console.log(`🤖 Model: ${CLAUDE_MODEL}`);
+  console.log(`🔖 Build: ${new Date().toISOString()}`);
 });
