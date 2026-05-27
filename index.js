@@ -106,6 +106,29 @@ async function handleEvent(event) {
 const DISCORD_WEBHOOK_ORDERS = process.env.DISCORD_WEBHOOK_ORDERS;
 const DISCORD_WEBHOOK_SUPPORT = process.env.DISCORD_WEBHOOK_SUPPORT;
 
+// Давталтаас сэргийлэх: senderId+type → сүүлд явуулсан timestamp
+const NOTIFY_DEDUP = new Map();
+const NOTIFY_DEDUP_TTL_MS = 30 * 60 * 1000; // 30 минут
+
+function shouldSendNotification(senderId, type) {
+  const key = `${senderId}:${type}`;
+  const lastSent = NOTIFY_DEDUP.get(key);
+  const now = Date.now();
+  if (lastSent && now - lastSent < NOTIFY_DEDUP_TTL_MS) {
+    return false;
+  }
+  NOTIFY_DEDUP.set(key, now);
+  return true;
+}
+
+// Хуучин dedup бичлэгүүдийг 15 минут тутамд цэвэрлэх
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, ts] of NOTIFY_DEDUP.entries()) {
+    if (now - ts > NOTIFY_DEDUP_TTL_MS) NOTIFY_DEDUP.delete(key);
+  }
+}, 15 * 60 * 1000).unref?.();
+
 // Claude-н хариултаас [NOTIFY:order]{...}[/NOTIFY] блокуудыг гарган авна
 function extractNotifications(text) {
   const notifications = [];
@@ -130,6 +153,11 @@ async function sendDiscordNotification(notification, senderId) {
 
   if (!webhook) {
     console.warn(`⚠️  Discord webhook (${type}) тохируулагдаагүй`);
+    return;
+  }
+
+  if (!shouldSendNotification(senderId, type)) {
+    console.log(`⏭️  Discord ${type} мэдэгдэл алгаслаа (давталт, ${senderId})`);
     return;
   }
 
@@ -581,6 +609,18 @@ VIOT платформ дараах орчинд ашиглагдана:
   бичих — энгийн ярианы үед БҮҮ БИЧ.
 - Хэрэглэгчид харагдах хариултыг бичсэний дараа хоосон
   мөр аваад блокыг тавь.
+
+❗❗❗ ХАМГИЙН ЧУХАЛ: NOTIFY БЛОКЫГ НЭГ ЯРИАНД ЗӨВХӨН
+НЭГ УДАА БИЧНЭ. Хэрэв ярианы өмнөх turn-д та аль хэдийн
+NOTIFY:order эсвэл NOTIFY:support блок бичсэн бол —
+ДАХИН БҮҮ БИЧ. Хэрэглэгч "баярлалаа", "ok" гэх мэт
+үргэлжлүүлэлт бичсэн ч NOTIFY блок ДАХИН ҮҮСГЭХГҮЙ.
+Зөвхөн товч хариул ("Баярлалаа, амжилт хүсье!" г.м.).
+
+❗ Өмнөх assistant хариултуудаа шалга. Хэрэв тэдгээрт
+"Манай мэргэжилтэн ... холбогдоно" эсвэл "техникч ажилтанд
+шилжүүлж байна" гэх мэт төгсгөлийн хариулт байгаа бол —
+энэ нь NOTIFY аль хэдийн явсан гэсэн үг. ДАХИН БҮҮ ЯВУУЛ.
 
 ЖИШЭЭ (бүрэн хариулт):
 "Баярлалаа! Таны хүсэлтийг хүлээн авлаа:
