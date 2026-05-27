@@ -78,14 +78,80 @@ async function handleEvent(event) {
   console.log(`📨 Мессеж ирлээ (${senderId}): "${userMessage}"`);
 
   await sendTypingIndicator(senderId);
-  const reply = await getClaudeReply(userMessage);
+
+  const history = getHistory(senderId);
+  history.push({ role: "user", content: userMessage });
+
+  const reply = await getClaudeReply(history);
+
+  history.push({ role: "assistant", content: reply });
+  trimHistory(senderId);
+
   await sendMessage(senderId, reply);
 }
 
 // ============================================================
+// ЯРИАНЫ ТҮҮХ — senderId тус бүрд in-memory хадгална
+// ============================================================
+const CONVO_STORE = new Map(); // senderId -> { messages: [], updatedAt: number }
+const MAX_TURNS = 20;            // user+assistant нийт хэдэн мессеж хадгалах
+const CONVO_TTL_MS = 60 * 60 * 1000; // 1 цаг идэвхгүй бол цэвэрлэнэ
+
+function getHistory(senderId) {
+  const now = Date.now();
+  let convo = CONVO_STORE.get(senderId);
+  if (!convo || now - convo.updatedAt > CONVO_TTL_MS) {
+    convo = { messages: [], updatedAt: now };
+    CONVO_STORE.set(senderId, convo);
+  }
+  convo.updatedAt = now;
+  return convo.messages;
+}
+
+function trimHistory(senderId) {
+  const convo = CONVO_STORE.get(senderId);
+  if (!convo) return;
+  if (convo.messages.length > MAX_TURNS) {
+    convo.messages = convo.messages.slice(-MAX_TURNS);
+  }
+}
+
+// 10 минут тутамд хуучирсан session-ийг цэвэрлэнэ
+setInterval(() => {
+  const now = Date.now();
+  for (const [sid, convo] of CONVO_STORE.entries()) {
+    if (now - convo.updatedAt > CONVO_TTL_MS) CONVO_STORE.delete(sid);
+  }
+}, 10 * 60 * 1000).unref?.();
+
+// ============================================================
 // 3. CLAUDE AI-ААС ХАРИУЛТ АВАХ
 // ============================================================
-const SYSTEM_PROMPT = `Та NUDEN Solution компанийн VIOT платформын албан ёсны AI туслах.
+const SYSTEM_PROMPT = `Та NUDEN Solution компанийн VIOT платформын албан ёсны AI туслагч.
+
+==================================================
+ЯРИАНЫ ХАМГИЙН ЧУХАЛ ЗАРЧИМ (ХАМГИЙН ДЭЭР УНШИНА УУ)
+==================================================
+
+❗ Та ЯРИАНЫ ӨМНӨХ ТҮҮХИЙГ хардаг. Урьд нь яригдсан зүйлийг
+   ДАХИН АСУУХГҮЙ, ДАХИН МЭНДЭЛЭХГҮЙ.
+
+❗ "Сайн байна уу?" гэх мэт мэндчилгээг ЗӨВХӨН ярианы хамгийн
+   ЭХНИЙ хариултанд нэг л удаа ашигла. Хэрвээ урьд нь өөрөө
+   мэндэлсэн бол ДАХИН БҮҮ МЭНД.
+
+❗ Хэрэв хэрэглэгч аль хэдийн өөрийгөө танилцуулсан, асуудлаа
+   хэлсэн, эсвэл сонголтоо хийсэн бол — тэр алхмыг АЛГАСААД
+   шууд дараагийн алхам руу ор. "Шинэ үйлчилгээ үү, асуудалтай
+   юу?" гэдэг асуултыг ӨМНӨХ МЭДЭЭЛЛЭЭС ОЙЛГОГДЖ БАЙВАЛ
+   БҮҮ АСУУ.
+
+❗ Хариулт нь scripted, шаардлагатай биш бот мэт сонсогдох ёсгүй.
+   Жинхэнэ хүн шиг, дулаахан, ойлгомжтой, харилцан ярианы аястай
+   бай. Хэрэглэгчийн хэлсэн зүйл рүү ШУУД хариул, дараа нь
+   шаардлагатай бол асуу.
+
+
 
 VIOT нь IoT (Internet of Things) технологид суурилсан хяналт, удирдлага,
 автоматжуулалт, дүн шинжилгээний цогц платформ юм.
@@ -104,19 +170,25 @@ B. ОДООГИЙН ХАРИЛЦАГЧ → Асуудлыг сонсож, өөр
    ажилтанд дамжуулна.
 
 ==================================================
-ХАМГИЙН ЭХНИЙ АЛХАМ: ХЭРЭГЛЭГЧИЙГ ТОДОРХОЙЛОХ
+ХАМГИЙН ЭХНИЙ МЕССЕЖ (ярианы түүх ХООСОН үед л)
 ==================================================
 
-Анхны мэндчилгээний дараа ЗААВАЛ дараах асуултыг асуу:
+Хэрэв ярианы түүх хоосон, хэрэглэгч анх удаа бичиж байгаа бол:
 
-"Сайн байна уу? VIOT платформ нь IoT технологид суурилсан хяналт,
-удирдлага, автоматжуулалтын цогц шийдэл юм.
+1. Хэрэглэгчийн бичсэн зүйлд ШУУД хариул (жишээ нь "сайн уу"
+   гэвэл богино мэндэлээд цааш үргэлжлүүл).
+2. Хэрэв юу хүсэж байгаа нь ТОДОРХОЙГҮЙ бол л дараах байдлаар
+   сонголт өг:
 
-Танд яаж туслах вэ?
-🔹 Шинэ үйлчилгээ авах сонирхолтой
-🔹 Одоо ашиглаж буй системтэй холбоотой асуудалтай"
+"Сайн байна уу 👋 Би VIOT платформын туслагч.
+Танд хэрхэн туслах вэ?
+🔹 Шинэ үйлчилгээ / шийдэл сонирхож байна
+🔹 Одоогийн системтэй холбоотой асуудалтай байна"
 
-Хэрэглэгчийн сонголтоос хамаарч 2 өөр урсгалаар үргэлжлүүл.
+⚠️ Хэрэв хэрэглэгч аль хэдийн "шинэ систем авмаар байна",
+"хүлэмжид sensor хэрэгтэй", "нэвтэрч чадахгүй байна" гэх мэт
+зүйлийг хэлсэн бол — ДЭЭРХ СОНГОЛТЫГ БҮҮ АСУУ. Шууд
+тохирох урсгал руу ор.
 
 ==================================================
 УРСГАЛ A: ШИНЭ ХАРИЛЦАГЧ (ЗАХИАЛГА АВАХ)
@@ -314,7 +386,7 @@ Smart Home, орон сууцны хотхон, оффис, барилга, үй
 ❗ Шилжүүлсний дараа НЭМЭЛТ АСУУЛТ АСУУХГҮЙ:
    "Мэргэжилтэн холбогдоно" гэж хэлсний дараа яриаг хаа.`;
 
-async function getClaudeReply(userMessage) {
+async function getClaudeReply(messages) {
   try {
     const response = await axios.post(
       "https://api.anthropic.com/v1/messages",
@@ -328,7 +400,7 @@ async function getClaudeReply(userMessage) {
             cache_control: { type: "ephemeral" },
           },
         ],
-        messages: [{ role: "user", content: userMessage }],
+        messages,
       },
       {
         headers: {
