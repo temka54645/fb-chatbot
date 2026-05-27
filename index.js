@@ -51,12 +51,15 @@ app.post("/webhook", async (req, res) => {
 
   try {
     const body = req.body;
-    if (body.object !== "page" || !Array.isArray(body.entry)) return;
+    // Messenger ("page") болон Instagram ("instagram") хоёуланг нь дэмжинэ
+    if (!["page", "instagram"].includes(body.object) || !Array.isArray(body.entry)) return;
+
+    const channel = body.object === "instagram" ? "instagram" : "messenger";
 
     for (const entry of body.entry) {
       const events = Array.isArray(entry.messaging) ? entry.messaging : [];
       for (const event of events) {
-        handleEvent(event).catch((err) =>
+        handleEvent(event, channel).catch((err) =>
           console.error("❌ handleEvent алдаа:", err.message)
         );
       }
@@ -66,7 +69,7 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-async function handleEvent(event) {
+async function handleEvent(event, channel = "messenger") {
   const senderId = event?.sender?.id;
   if (!senderId) return;
 
@@ -76,11 +79,14 @@ async function handleEvent(event) {
   const userMessage = event.message?.text;
   if (!userMessage) return;
 
-  console.log(`📨 Мессеж ирлээ (${senderId}): "${userMessage}"`);
+  console.log(`📨 [${channel}] Мессеж ирлээ (${senderId}): "${userMessage}"`);
 
   await sendTypingIndicator(senderId);
 
-  const history = await getHistory(senderId);
+  // Channel-г түлхүүрт оруулж — Messenger ID ба Instagram ID-ийг
+  // санамсаргүй давхцал гарвал ч зөв тусгаарлана
+  const convoKey = `${channel}:${senderId}`;
+  const history = await getHistory(convoKey);
   history.push({ role: "user", content: userMessage });
 
   const rawReply = await getClaudeReply(history);
@@ -88,14 +94,14 @@ async function handleEvent(event) {
 
   // Discord-д мэдэгдэл явуулах (background, хариулт хүлээхгүй)
   for (const n of notifications) {
-    sendDiscordNotification(n, senderId).catch((err) =>
+    sendDiscordNotification(n, senderId, channel).catch((err) =>
       console.error("❌ Discord мэдэгдэл алдаа:", err.message)
     );
   }
 
   history.push({ role: "assistant", content: cleanReply });
   const trimmed = history.length > MAX_TURNS ? history.slice(-MAX_TURNS) : history;
-  await saveHistory(senderId, trimmed);
+  await saveHistory(convoKey, trimmed);
 
   await sendMessage(senderId, cleanReply);
 }
@@ -146,7 +152,7 @@ function extractNotifications(text) {
   return { cleanReply, notifications };
 }
 
-async function sendDiscordNotification(notification, senderId) {
+async function sendDiscordNotification(notification, senderId, channel = "messenger") {
   const { type, data } = notification;
   const webhook =
     type === "order" ? DISCORD_WEBHOOK_ORDERS : DISCORD_WEBHOOK_SUPPORT;
@@ -156,17 +162,18 @@ async function sendDiscordNotification(notification, senderId) {
     return;
   }
 
-  if (!shouldSendNotification(senderId, type)) {
-    console.log(`⏭️  Discord ${type} мэдэгдэл алгаслаа (давталт, ${senderId})`);
+  if (!shouldSendNotification(`${channel}:${senderId}`, type)) {
+    console.log(`⏭️  Discord ${type} мэдэгдэл алгаслаа (давталт, ${channel}:${senderId})`);
     return;
   }
 
   const isOrder = type === "order";
+  const channelIcon = channel === "instagram" ? "📷 Instagram" : "💬 Messenger";
   const embed = {
     title: isOrder ? "🆕 Шинэ VIOT захиалга" : "🛠️ Техникийн дэмжлэгийн хүсэлт",
     color: isOrder ? 0x00cc88 : 0xff9900,
     fields: [],
-    footer: { text: `Facebook ID: ${senderId}` },
+    footer: { text: `${channelIcon} · ID: ${senderId}` },
     timestamp: new Date().toISOString(),
   };
 
