@@ -7,6 +7,7 @@ const app = express();
 app.use(express.json());
 
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
+const INSTAGRAM_ACCESS_TOKEN = process.env.INSTAGRAM_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-6";
@@ -17,6 +18,9 @@ for (const [key, value] of Object.entries(REQUIRED_ENV)) {
     console.error(`❌ Шаардлагатай env variable дутуу байна: ${key}`);
     process.exit(1);
   }
+}
+if (!INSTAGRAM_ACCESS_TOKEN) {
+  console.warn("⚠️  INSTAGRAM_ACCESS_TOKEN тохируулагдаагүй — Instagram DM ажиллахгүй (Messenger хэвийн).");
 }
 
 // ============================================================
@@ -81,7 +85,7 @@ async function handleEvent(event, channel = "messenger") {
 
   console.log(`📨 [${channel}] Мессеж ирлээ (${senderId}): "${userMessage}"`);
 
-  await sendTypingIndicator(senderId);
+  await sendTypingIndicator(senderId, channel);
 
   // Channel-г түлхүүрт оруулж — Messenger ID ба Instagram ID-ийг
   // санамсаргүй давхцал гарвал ч зөв тусгаарлана
@@ -103,7 +107,7 @@ async function handleEvent(event, channel = "messenger") {
   const trimmed = history.length > MAX_TURNS ? history.slice(-MAX_TURNS) : history;
   await saveHistory(convoKey, trimmed);
 
-  await sendMessage(senderId, cleanReply);
+  await sendMessage(senderId, cleanReply, channel);
 }
 
 // ============================================================
@@ -701,41 +705,61 @@ async function getClaudeReply(messages) {
 }
 
 // ============================================================
-// 4. FACEBOOK-РУУ МЕССЕЖ ИЛГЭЭХ
+// 4. МЕССЕЖ ИЛГЭЭХ (Messenger / Instagram)
 // ============================================================
-async function sendMessage(recipientId, text) {
+function getChannelConfig(channel) {
+  if (channel === "instagram") {
+    return {
+      url: "https://graph.instagram.com/v23.0/me/messages",
+      token: INSTAGRAM_ACCESS_TOKEN,
+    };
+  }
+  return {
+    url: "https://graph.facebook.com/v19.0/me/messages",
+    token: PAGE_ACCESS_TOKEN,
+  };
+}
+
+async function sendMessage(recipientId, text, channel = "messenger") {
+  const { url, token } = getChannelConfig(channel);
+  if (!token) {
+    console.error(`❌ ${channel} access token тохируулагдаагүй`);
+    return;
+  }
   try {
     await axios.post(
-      "https://graph.facebook.com/v19.0/me/messages",
+      url,
       {
         recipient: { id: recipientId },
         message: { text },
       },
       {
-        params: { access_token: PAGE_ACCESS_TOKEN },
+        params: { access_token: token },
         timeout: 15000,
       }
     );
-    console.log(`✅ Хариулт илгээлээ (${recipientId})`);
+    console.log(`✅ [${channel}] Хариулт илгээлээ (${recipientId})`);
   } catch (error) {
     const detail = error.response?.data || error.message;
-    console.error("❌ Мессеж илгээхэд алдаа:", JSON.stringify(detail));
+    console.error(`❌ [${channel}] Мессеж илгээхэд алдаа:`, JSON.stringify(detail));
   }
 }
 
 // ============================================================
 // 5. "БИЧИЖ БАЙНА..." ИНДИКАТОР
 // ============================================================
-async function sendTypingIndicator(recipientId) {
+async function sendTypingIndicator(recipientId, channel = "messenger") {
+  const { url, token } = getChannelConfig(channel);
+  if (!token) return;
   try {
     await axios.post(
-      "https://graph.facebook.com/v19.0/me/messages",
+      url,
       {
         recipient: { id: recipientId },
         sender_action: "typing_on",
       },
       {
-        params: { access_token: PAGE_ACCESS_TOKEN },
+        params: { access_token: token },
         timeout: 10000,
       }
     );
