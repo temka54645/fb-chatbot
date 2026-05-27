@@ -1,5 +1,6 @@
 const express = require("express");
 const axios = require("axios");
+const { createClient } = require("redis");
 require("dotenv").config();
 
 const app = express();
@@ -79,50 +80,78 @@ async function handleEvent(event) {
 
   await sendTypingIndicator(senderId);
 
-  const history = getHistory(senderId);
+  const history = await getHistory(senderId);
   history.push({ role: "user", content: userMessage });
 
   const reply = await getClaudeReply(history);
 
   history.push({ role: "assistant", content: reply });
-  trimHistory(senderId);
+  const trimmed = history.length > MAX_TURNS ? history.slice(-MAX_TURNS) : history;
+  await saveHistory(senderId, trimmed);
 
   await sendMessage(senderId, reply);
 }
 
 // ============================================================
-// ЯРИАНЫ ТҮҮХ — senderId тус бүрд in-memory хадгална
+// ЯРИАНЫ ТҮҮХ — Redis (persistent) эсвэл fallback in-memory
 // ============================================================
-const CONVO_STORE = new Map(); // senderId -> { messages: [], updatedAt: number }
-const MAX_TURNS = 20;            // user+assistant нийт хэдэн мессеж хадгалах
-const CONVO_TTL_MS = 60 * 60 * 1000; // 1 цаг идэвхгүй бол цэвэрлэнэ
+const MAX_TURNS = 20;                            // нийт user+assistant turn
+const CONVO_TTL_SEC = 7 * 24 * 60 * 60;          // 7 хоног идэвхгүй бол устгана
+const KEY_PREFIX = "convo:";
 
-function getHistory(senderId) {
-  const now = Date.now();
-  let convo = CONVO_STORE.get(senderId);
-  if (!convo || now - convo.updatedAt > CONVO_TTL_MS) {
-    convo = { messages: [], updatedAt: now };
-    CONVO_STORE.set(senderId, convo);
+let redisClient = null;
+let redisReady = false;
+const MEM_STORE = new Map(); // fallback (REDIS_URL байхгүй үед)
+
+async function initRedis() {
+  const url = process.env.REDIS_URL;
+  if (!url) {
+    console.warn("⚠️  REDIS_URL тохируулагдаагүй — in-memory fallback ашиглана (restart хийхэд яриа алдагдана).");
+    return;
   }
-  convo.updatedAt = now;
-  return convo.messages;
+  try {
+    redisClient = createClient({ url });
+    redisClient.on("error", (err) => {
+      console.error("❌ Redis алдаа:", err.message);
+      redisReady = false;
+    });
+    redisClient.on("ready", () => {
+      redisReady = true;
+      console.log("✅ Redis холбогдлоо");
+    });
+    await redisClient.connect();
+  } catch (err) {
+    console.error("❌ Redis холбогдох амжилтгүй:", err.message);
+    redisClient = null;
+    redisReady = false;
+  }
 }
 
-function trimHistory(senderId) {
-  const convo = CONVO_STORE.get(senderId);
-  if (!convo) return;
-  if (convo.messages.length > MAX_TURNS) {
-    convo.messages = convo.messages.slice(-MAX_TURNS);
+async function getHistory(senderId) {
+  const key = KEY_PREFIX + senderId;
+  if (redisReady) {
+    try {
+      const raw = await redisClient.get(key);
+      return raw ? JSON.parse(raw) : [];
+    } catch (err) {
+      console.error("❌ Redis get алдаа:", err.message);
+    }
   }
+  return MEM_STORE.get(senderId) ? [...MEM_STORE.get(senderId)] : [];
 }
 
-// 10 минут тутамд хуучирсан session-ийг цэвэрлэнэ
-setInterval(() => {
-  const now = Date.now();
-  for (const [sid, convo] of CONVO_STORE.entries()) {
-    if (now - convo.updatedAt > CONVO_TTL_MS) CONVO_STORE.delete(sid);
+async function saveHistory(senderId, messages) {
+  const key = KEY_PREFIX + senderId;
+  if (redisReady) {
+    try {
+      await redisClient.set(key, JSON.stringify(messages), { EX: CONVO_TTL_SEC });
+      return;
+    } catch (err) {
+      console.error("❌ Redis set алдаа:", err.message);
+    }
   }
-}, 10 * 60 * 1000).unref?.();
+  MEM_STORE.set(senderId, messages);
+}
 
 // ============================================================
 // 3. CLAUDE AI-ААС ХАРИУЛТ АВАХ
@@ -477,9 +506,10 @@ async function sendTypingIndicator(recipientId) {
 // SERVER ЭХЛҮҮЛЭХ
 // ============================================================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server ажиллаж байна (v2): http://localhost:${PORT}`);
+app.listen(PORT, async () => {
+  console.log(`🚀 Server ажиллаж байна (v3): http://localhost:${PORT}`);
   console.log(`📡 Webhook URL: /webhook`);
   console.log(`🤖 Model: ${CLAUDE_MODEL}`);
   console.log(`🔖 Build: ${new Date().toISOString()}`);
+  await initRedis();
 });
